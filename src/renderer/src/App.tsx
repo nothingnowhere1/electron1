@@ -11,8 +11,17 @@ function App() {
     const [isMicrophoneActive, setIsMicrophoneActive] = useState<boolean>(false)
     const [audioLevel, setAudioLevel] = useState<number>(0)
 
+    // Screen sources and recording state
+    const [screenSources, setScreenSources] = useState<Array<{id: string, name: string, thumbnail: string}>>([])
+    const [selectedSource, setSelectedSource] = useState<string>('')
+    const [isRecording, setIsRecording] = useState<boolean>(false)
+    const [recordedVideo, setRecordedVideo] = useState<string | null>(null)
+
     // Refs for DOM elements
     const videoRef = useRef<HTMLVideoElement>(null)
+    const recordedVideoRef = useRef<HTMLVideoElement>(null)
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+    const recordedChunksRef = useRef<Blob[]>([])
     const audioContext = useRef<AudioContext | null>(null)
     const audioAnalyser = useRef<AnalyserNode | null>(null)
     const audioDataArray = useRef<Uint8Array | null>(null)
@@ -48,6 +57,9 @@ function App() {
 
         getDevices()
 
+        // Get available screen sources from electron
+        fetchScreenSources()
+
         // Set up device change listener
         navigator.mediaDevices.addEventListener('devicechange', getDevices)
 
@@ -62,8 +74,33 @@ function App() {
             if (audioContext.current) {
                 audioContext.current.close()
             }
+
+            // Clean up recording
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                mediaRecorderRef.current.stop()
+            }
+
+            // Revoke object URL if one exists
+            if (recordedVideo) {
+                URL.revokeObjectURL(recordedVideo)
+            }
         }
-    }, [])
+    }, [recordedVideo])
+
+    // Fetch screen sources from Electron
+    const fetchScreenSources = async () => {
+        try {
+            // Call the Electron API function via preload
+            const sources = await window.api.getScreenSources()
+            setScreenSources(sources)
+
+            if (sources.length > 0) {
+                setSelectedSource(sources[0].id)
+            }
+        } catch (error) {
+            console.error('Failed to get screen sources:', error)
+        }
+    }
 
     // Function to activate camera
     const startCamera = async () => {
@@ -155,22 +192,29 @@ function App() {
         setIsMicrophoneActive(false)
     }
 
-    // Function to start screen sharing
+    // Function to start screen sharing using Electron's desktopCapturer
     const startScreenShare = async () => {
         try {
             // Stop any existing streams
             stopAllStreams()
 
-            const stream = await navigator.mediaDevices.getDisplayMedia({
-                video: true,
-                audio: false
-            })
+            if (!selectedSource) {
+                alert("Please select a screen source first")
+                return
+            }
 
-            // Handle stream ending (user stops sharing)
-            stream.getVideoTracks()[0].addEventListener('ended', () => {
-                setIsScreenSharing(false)
-                setActiveDevice('none')
-            })
+            // Create constraints for getUserMedia using the selected source ID
+            const constraints = {
+                audio: false,
+                video: {
+                    mandatory: {
+                        chromeMediaSource: 'desktop',
+                        chromeMediaSourceId: selectedSource
+                    }
+                }
+            } as any; // Type assertion needed for Electron-specific constraints
+
+            const stream = await navigator.mediaDevices.getUserMedia(constraints)
 
             if (videoRef.current) {
                 videoRef.current.srcObject = stream
@@ -185,6 +229,11 @@ function App() {
 
     // Function to stop all streams
     const stopAllStreams = () => {
+        // Stop recording first if active
+        if (isRecording) {
+            stopRecording()
+        }
+
         if (videoRef.current && videoRef.current.srcObject) {
             const stream = videoRef.current.srcObject as MediaStream
             stream.getTracks().forEach((track) => track.stop())
@@ -192,6 +241,77 @@ function App() {
         }
 
         stopMicrophone()
+    }
+
+    // Start recording the current stream
+    const startRecording = () => {
+        // Clear previous recording if any
+        if (recordedVideo) {
+            URL.revokeObjectURL(recordedVideo)
+            setRecordedVideo(null)
+        }
+
+        if (!videoRef.current?.srcObject) {
+            alert('Please start a stream before recording')
+            return
+        }
+
+        recordedChunksRef.current = []
+
+        try {
+            const stream = videoRef.current.srcObject as MediaStream
+
+            // Create options with audio if needed
+            let options = { mimeType: 'video/webm; codecs=vp9' }
+
+            // Create media recorder
+            const mediaRecorder = new MediaRecorder(stream, options)
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    recordedChunksRef.current.push(event.data)
+                }
+            }
+
+            mediaRecorder.onstop = () => {
+                // Create a blob from the recorded chunks
+                const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' })
+                const url = URL.createObjectURL(blob)
+                setRecordedVideo(url)
+            }
+
+            // Start recording
+            mediaRecorder.start(100) // Collect data every 100ms
+            mediaRecorderRef.current = mediaRecorder
+            setIsRecording(true)
+
+        } catch (error) {
+            console.error('Error starting recording:', error)
+        }
+    }
+
+    // Stop recording
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+            mediaRecorderRef.current.stop()
+            setIsRecording(false)
+        }
+    }
+
+    // Save the recording as a file
+    const downloadRecording = () => {
+        if (!recordedVideo) return
+
+        const a = document.createElement('a')
+        document.body.appendChild(a)
+        a.style.display = 'none'
+        a.href = recordedVideo
+        a.download = `screen-recording-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.webm`
+        a.click()
+
+        setTimeout(() => {
+            document.body.removeChild(a)
+        }, 100)
     }
 
     // Change video device
@@ -210,6 +330,11 @@ function App() {
         }
     }
 
+    // Change screen source
+    const handleSourceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        setSelectedSource(e.target.value)
+    }
+
     return (
         <div
             className="device-test-container"
@@ -226,7 +351,7 @@ function App() {
 
             <div style={{ display: 'flex', gap: '20px', height: 'calc(100% - 100px)' }}>
                 {/* Left panel for video display */}
-                <div style={{ flex: '3', display: 'flex', flexDirection: 'column' }}>
+                <div style={{ flex: '3', display: 'flex', flexDirection: 'column', gap: '15px' }}>
                     <div
                         style={{
                             flex: '1',
@@ -300,6 +425,23 @@ function App() {
                             </div>
                         )}
                     </div>
+
+                    {/* Recording display */}
+                    {recordedVideo && (
+                        <div style={{ flex: '1', backgroundColor: '#222', borderRadius: '8px', overflow: 'hidden' }}>
+                            <video
+                                ref={recordedVideoRef}
+                                src={recordedVideo}
+                                controls
+                                style={{
+                                    width: '100%',
+                                    height: '100%',
+                                    objectFit: 'contain',
+                                    backgroundColor: '#000'
+                                }}
+                            />
+                        </div>
+                    )}
                 </div>
 
                 {/* Right panel for controls */}
@@ -342,7 +484,7 @@ function App() {
                             </select>
                         </div>
 
-                        <div>
+                        <div style={{ marginBottom: '15px' }}>
                             <label style={{ display: 'block', marginBottom: '5px' }}>
                                 Audio Source:
                             </label>
@@ -369,6 +511,33 @@ function App() {
                                 ))}
                             </select>
                         </div>
+
+                        <div>
+                            <label style={{ display: 'block', marginBottom: '5px' }}>
+                                Screen Source:
+                            </label>
+                            <select
+                                value={selectedSource}
+                                onChange={handleSourceChange}
+                                style={{
+                                    width: '100%',
+                                    padding: '8px',
+                                    backgroundColor: 'var(--ev-c-black-mute)',
+                                    color: 'white',
+                                    border: '1px solid var(--ev-c-gray-3)',
+                                    borderRadius: '4px'
+                                }}
+                            >
+                                {screenSources.length === 0 && (
+                                    <option value="">Loading screen sources...</option>
+                                )}
+                                {screenSources.map((source) => (
+                                    <option key={source.id} value={source.id}>
+                                        {source.name}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
                     </div>
 
                     {/* Control buttons */}
@@ -382,7 +551,7 @@ function App() {
                             gap: '10px'
                         }}
                     >
-                        <h3 style={{ marginBottom: '5px' }}>Controls</h3>
+                        <h3 style={{ marginBottom: '5px' }}>Media Controls</h3>
 
                         <button
                             onClick={startCamera}
@@ -390,8 +559,8 @@ function App() {
                                 padding: '10px',
                                 backgroundColor:
                                     activeDevice === 'camera'
-                                        ? 'var(--ev-c-gray-1)'
-                                        : 'var(--ev-c-gray-3)',
+                                    ? 'var(--ev-c-gray-1)'
+                                    : 'var(--ev-c-gray-3)',
                                 border: 'none',
                                 borderRadius: '4px',
                                 color: 'white',
@@ -411,8 +580,8 @@ function App() {
                             style={{
                                 padding: '10px',
                                 backgroundColor: isMicrophoneActive
-                                    ? 'var(--ev-c-gray-1)'
-                                    : 'var(--ev-c-gray-3)',
+                                                 ? 'var(--ev-c-gray-1)'
+                                                 : 'var(--ev-c-gray-3)',
                                 border: 'none',
                                 borderRadius: '4px',
                                 color: 'white',
@@ -433,8 +602,8 @@ function App() {
                                 padding: '10px',
                                 backgroundColor:
                                     activeDevice === 'screen'
-                                        ? 'var(--ev-c-gray-1)'
-                                        : 'var(--ev-c-gray-3)',
+                                    ? 'var(--ev-c-gray-1)'
+                                    : 'var(--ev-c-gray-3)',
                                 border: 'none',
                                 borderRadius: '4px',
                                 color: 'white',
@@ -468,6 +637,62 @@ function App() {
                             <span style={{ fontSize: '18px' }}>⏹️</span>
                             <span>Stop All</span>
                         </button>
+                    </div>
+
+                    {/* Recording controls */}
+                    <div
+                        style={{
+                            backgroundColor: 'var(--ev-c-black-soft)',
+                            padding: '15px',
+                            borderRadius: '8px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '10px'
+                        }}
+                    >
+                        <h3 style={{ marginBottom: '5px' }}>Recording Controls</h3>
+
+                        <button
+                            onClick={isRecording ? stopRecording : startRecording}
+                            disabled={!videoRef.current?.srcObject}
+                            style={{
+                                padding: '10px',
+                                backgroundColor: isRecording ? '#d32f2f' : '#2e7d32',
+                                border: 'none',
+                                borderRadius: '4px',
+                                color: 'white',
+                                cursor: videoRef.current?.srcObject ? 'pointer' : 'not-allowed',
+                                opacity: videoRef.current?.srcObject ? 1 : 0.6,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '8px'
+                            }}
+                        >
+                            <span style={{ fontSize: '18px' }}>{isRecording ? '⏹️' : '⏺️'}</span>
+                            <span>{isRecording ? 'Stop Recording' : 'Start Recording'}</span>
+                        </button>
+
+                        {recordedVideo && (
+                            <button
+                                onClick={downloadRecording}
+                                style={{
+                                    padding: '10px',
+                                    backgroundColor: 'var(--ev-c-gray-3)',
+                                    border: 'none',
+                                    borderRadius: '4px',
+                                    color: 'white',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    gap: '8px'
+                                }}
+                            >
+                                <span style={{ fontSize: '18px' }}>💾</span>
+                                <span>Download Recording</span>
+                            </button>
+                        )}
                     </div>
 
                     {/* Status area */}
@@ -522,7 +747,8 @@ function App() {
                                 style={{
                                     display: 'flex',
                                     justifyContent: 'space-between',
-                                    padding: '8px 0'
+                                    padding: '8px 0',
+                                    borderBottom: '1px solid var(--ev-c-gray-3)'
                                 }}
                             >
                                 <span>Screen Capture</span>
@@ -532,6 +758,23 @@ function App() {
                                     }}
                                 >
                                     {activeDevice === 'screen' ? 'Active' : 'Inactive'}
+                                </span>
+                            </div>
+
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    padding: '8px 0'
+                                }}
+                            >
+                                <span>Recording</span>
+                                <span
+                                    style={{
+                                        color: isRecording ? '#4CAF50' : '#999'
+                                    }}
+                                >
+                                    {isRecording ? 'Active' : 'Inactive'}
                                 </span>
                             </div>
                         </div>
