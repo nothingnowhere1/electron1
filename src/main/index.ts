@@ -1,4 +1,14 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, screen, session, shell } from 'electron'
+import {
+    app,
+    BrowserWindow,
+    desktopCapturer,
+    dialog,
+    ipcMain,
+    screen,
+    session,
+    shell,
+    systemPreferences
+} from 'electron'
 import path, { join } from 'path'
 import { electronApp, is, optimizer } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -7,6 +17,7 @@ import fs from 'fs'
 import { spawn } from 'child_process'
 import ffmpegStatic from 'ffmpeg-static'
 import { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { getBestFramerate, listAvailableDevices } from './shared'
 
 let ffmpegProcess: ChildProcessWithoutNullStreams | null
 let streamStatus = {
@@ -20,50 +31,44 @@ let ffmpegProcess2: ChildProcessWithoutNullStreams | null
 async function startScreenRtmpStream(
     sourceId: string,
     audioDeviceId: string | undefined,
-    rtmpUrl: string
+    rtmpUrl: string,
+    screenId: string
 ): Promise<{ success: boolean; message: string }> {
     if (ffmpegProcess2) {
         return { success: false, message: 'Stream is already running' }
     }
     try {
-        console.log(`Using FFmpeg from: ${ffmpegStatic}`)
-        console.log(`Screen source ID: ${sourceId}`)
-
-        // For screen capture, we need to use a different approach
-        // We'll use Electron's desktopCapturer to get thumbnails and metadata for the screen
         const sources = await desktopCapturer.getSources({
             types: ['window', 'screen'],
             thumbnailSize: { width: 100, height: 100 }
         })
 
-        const selectedSource = sources.find((source) => source.id === sourceId)
-        console.log('All sources', sources)
+        const selectedSource = sources.find((source) => source.id === screenId)
+
         if (!selectedSource) {
             return { success: false, message: `Screen source with ID ${sourceId} not found` }
         }
 
-        console.log(`Selected screen source: ${selectedSource.name}`)
+        const inputArgs: string[] = []
 
-        // Determine OS-specific settings
-        const inputArgs = []
+        const bestFramerate = await getBestFramerate(screenId)
+
+        console.log('bas', bestFramerate)
 
         if (process.platform === 'win32') {
-            // On Windows, use gdigrab or dshow
             inputArgs.push('-f', 'gdigrab', '-framerate', '30', '-i', 'desktop')
         } else if (process.platform === 'darwin') {
-            // On macOS, use avfoundation
-            // The "1" is typically the entire screen on macOS, but may need adjustment
-            // Use "-video_size" to specify resolution if needed
+            const screenNumericId = screenId.match(/screen:(\d+):/)?.[1] || '1'
+
             inputArgs.push(
                 '-f',
                 'avfoundation',
                 '-framerate',
-                '30',
-                // Ensure proper pixel format
+                `${30}`,
                 '-pix_fmt',
-                'uyvy422', // This is supported according to your error logs
+                'uyvy422',
                 '-i',
-                '1:none' // "1" is typically the entire screen on macOS
+                `${screenNumericId}:none` // "1" is typically the entire screen on macOS
             )
         } else {
             // On Linux, use x11grab
@@ -101,18 +106,43 @@ async function startScreenRtmpStream(
 
         // Add output settings
         const outputArgs = [
+            // Видеокодек
             '-c:v',
             'libx264',
+
+            // Предустановка кодирования (медленнее = выше качество)
             '-preset',
-            'veryfast',
+            'medium', // 'veryfast' -> 'medium' для лучшего качества
+
+            // Настройка для стриминга
             '-tune',
-            'zerolatency', // Better for streaming
+            'zerolatency',
+
+            // Повышенный битрейт для лучшего качества
             '-b:v',
-            '2500k',
+            '6000k', // Увеличено с 2500k до 6000k
+
+            // Буфер для битрейта
             '-bufsize',
-            '5000k',
+            '12000k', // Увеличено с 5000k до 12000k
+
+            // Профиль H.264
+            '-profile:v',
+            'high', // Добавлен профиль high для лучшего качества
+
+            // Уровень H.264
+            '-level:v',
+            '4.2', // Добавлен уровень 4.2
+
+            // Установка интервала ключевых кадров
+            '-g',
+            '60', // Ключевой кадр каждые 2 секунды при 30fps
+
+            // Формат пикселей
             '-pix_fmt',
-            'yuv420p', // Ensure compatibility
+            'yuv420p',
+
+            // Формат вывода
             '-f',
             'flv',
             rtmpUrl
@@ -155,7 +185,9 @@ async function startScreenRtmpStream(
         return { success: true, message: 'Screen stream started successfully' }
     } catch (error) {
         console.error('Error starting screen stream:', error)
-        streamStatus.error = error.toString()
+        if (error instanceof Error) {
+            streamStatus.error = error.toString()
+        }
         return { success: false, message: `Error starting screen stream: ${error}` }
     }
 }
@@ -190,7 +222,7 @@ async function startRtmpStream(
             '-f',
             inputFormat,
             '-framerate',
-            '30',
+            '60',
             '-video_size',
             '1280x720',
             '-i',
@@ -393,7 +425,13 @@ function createWindow(): void {
     })
 
     ipcMain.handle('start-screen-rtmp-stream', async (_, options) => {
-        return await startScreenRtmpStream(options.sourceId, options.audioDeviceId, options.rtmpUrl)
+        console.log(options)
+        return await startScreenRtmpStream(
+            options.sourceId,
+            options.audioDeviceId,
+            options.rtmpUrl,
+            options.screenId
+        )
     })
 
     // Create temporary directory for recordings
@@ -402,48 +440,7 @@ function createWindow(): void {
         fs.mkdirSync(tempDir, { recursive: true })
     }
 
-    function listAvailableDevices(): Promise<string> {
-        return new Promise((resolve, reject) => {
-            let deviceListCommand: string
 
-            if (process.platform === 'darwin') {
-                // macOS - list avfoundation devices
-                deviceListCommand = '-f avfoundation -list_devices true -i ""'
-            } else if (process.platform === 'win32') {
-                // Windows - list dshow devices
-                deviceListCommand = '-f dshow -list_devices true -i dummy'
-            } else {
-                // Linux - list v4l2 devices
-                deviceListCommand = '-f v4l2 -list_devices true -i /dev/video0'
-            }
-
-            const args = deviceListCommand.split(' ').filter((arg) => arg.length > 0)
-            const ffmpeg: ChildProcessWithoutNullStreams = spawn(ffmpegStatic ?? '', args, {
-                stdio: 'pipe'
-            })
-
-            let output = ''
-            let errorOutput = ''
-
-            ffmpeg.stdout.on('data', (data) => {
-                output += data.toString()
-            })
-
-            ffmpeg.stderr.on('data', (data) => {
-                errorOutput += data.toString()
-            })
-
-            ffmpeg.on('close', (code) => {
-                console.log(`FFmpeg device listing exited with code ${code}`)
-                // For FFmpeg, the device list is usually in stderr even though it's not an error
-                resolve(errorOutput || output)
-            })
-
-            ffmpeg.on('error', (err) => {
-                reject(`Failed to list devices: ${err}`)
-            })
-        })
-    }
 
     // Add IPC handlers for RTMP streaming
     ipcMain.handle('start-rtmp-stream', async (_, options) => {
@@ -472,7 +469,6 @@ function createWindow(): void {
         return streamStatus
     })
 
-    // Add handler to list available devices
     ipcMain.handle('list-ffmpeg-devices', async () => {
         try {
             const devices = await listAvailableDevices()
@@ -483,7 +479,6 @@ function createWindow(): void {
         }
     })
 
-    // Handler for recording media stream
     ipcMain.handle('record-media-to-file', async () => {
         try {
             const outputPath = path.join(tempDir, `recording-${Date.now()}.mp4`)
@@ -539,48 +534,46 @@ function createWindow(): void {
     }
 }
 
-// This method will be called when Electron has finished
-// initialization and is ready to create browser windows.
-// Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
-    // Set app user model id for windows
+    if (process.platform === 'darwin') {
+        const screenCaptureStatus = systemPreferences.getMediaAccessStatus('screen')
+        if (screenCaptureStatus !== 'granted') {
+            dialog
+                .showMessageBox({
+                    type: 'warning',
+                    title: 'Screen Recording Permission Required',
+                    message: 'This app needs screen recording permission to stream your screen.',
+                    detail: 'Please go to System Preferences > Security & Privacy > Privacy > Screen Recording and enable permission for this app.',
+                    buttons: ['OK'],
+                    defaultId: 0
+                })
+                .catch(() => {})
+        }
+    }
+
     electronApp.setAppUserModelId('com.electron')
 
-    // Default open or close DevTools by F12 in development
-    // and ignore CommandOrControl + R in production.
-    // see https://github.com/alex8088/electron-toolkit/tree/master/packages/utils
     app.on('browser-window-created', (_, window) => {
         optimizer.watchWindowShortcuts(window)
     })
 
-    // IPC test
     ipcMain.on('ping', () => console.log('pong'))
 
-    // Start the RTMP media server
     startMediaServer()
 
     createWindow()
 
     app.on('activate', function () {
-        // On macOS it's common to re-create a window in the app when the
-        // dock icon is clicked and there are no other windows open.
         if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
 })
 
-// Quit when all windows are closed, except on macOS. There, it's common
-// for applications and their menu bar to stay active until the user quits
-// explicitly with Cmd + Q.
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit()
     }
 })
 
-// Clean up resources before app quits
 app.on('will-quit', () => {
     cleanupMediaServer()
 })
-
-// In this file you can include the rest of your app's specific main process
-// code. You can also put them in separate files and require them here.

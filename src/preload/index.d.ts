@@ -20,7 +20,8 @@ declare global {
             startScreenRtmpStream: (options: {
                 sourceId: string
                 audioDeviceId?: string
-                rtmpUrl: string
+                rtmpUrl: string,
+                screenId: string
             }) => Promise<{ success: boolean; message: string }>
             // Add new RTMP streaming methods
             startRtmpStream: (options: {
