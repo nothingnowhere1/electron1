@@ -12,7 +12,7 @@ function App() {
 
     // RTMP streaming state
     const [isRtmpStreaming, setIsRtmpStreaming] = useState<boolean>(false)
-    const [rtmpUrl, setRtmpUrl] = useState<string>('')
+    const [rtmpUrl, setRtmpUrl] = useState<string>('rtmp://proctor.sofiasoft.kz/live')
     const [streamDuration, setStreamDuration] = useState<number>(0)
     const [streamError, setStreamError] = useState<string>('')
 
@@ -104,7 +104,9 @@ function App() {
         try {
             // Call the Electron API function via preload
             const sources = await window.api.getScreenSources()
-
+            sources.forEach((source) => {
+                console.log(source)
+            })
             if (sources.length > 0) {
                 setSelectedSource(sources[0].id)
             }
@@ -204,11 +206,13 @@ function App() {
     const startScreenRtmpStreaming = async () => {
         try {
             const rtmpUrl2 = rtmpUrl + 2
+            console.log('RTMP streaming: ', rtmpUrl2)
 
             const result = await window.api.startScreenRtmpStream({
-                sourceId: selectedSource, // This should be your screen source ID state variable
+                sourceId: selectedSource,
                 audioDeviceId: isMicrophoneActive ? currentAudioDevice : undefined,
-                rtmpUrl: rtmpUrl2
+                rtmpUrl: rtmpUrl2,
+                screenId: selectedSource
             })
 
             if (result.success) {

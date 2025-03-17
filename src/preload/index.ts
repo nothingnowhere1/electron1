@@ -19,6 +19,7 @@ const api = {
         sourceId: string
         audioDeviceId?: string
         rtmpUrl: string
+        screenId: string
     }) => ipcRenderer.invoke('start-screen-rtmp-stream', options),
 
     stopRtmpStream: () => ipcRenderer.invoke('stop-rtmp-stream'),
