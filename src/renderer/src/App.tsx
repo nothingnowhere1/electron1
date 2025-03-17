@@ -207,10 +207,11 @@ function App() {
         try {
             const rtmpUrl2 = rtmpUrl + 2
             console.log('RTMP streaming: ', rtmpUrl2)
+            console.log(selectedSource)
 
             const result = await window.api.startScreenRtmpStream({
                 sourceId: selectedSource,
-                audioDeviceId: isMicrophoneActive ? currentAudioDevice : undefined,
+                audioDeviceId: currentAudioDevice,
                 rtmpUrl: rtmpUrl2,
                 screenId: selectedSource
             })
@@ -227,41 +228,6 @@ function App() {
             if (error instanceof Error) {
                 setStreamError(`Error: ${error.message}`)
             }
-        }
-    }
-
-    // Function to start screen sharing
-    const startScreenShare = async () => {
-        try {
-            // Stop any existing streams
-            stopAllStreams()
-
-            const constraints = {
-                audio: false,
-                video: {
-                    mandatory: {
-                        chromeMediaSource: 'desktop',
-                        chromeMediaSourceId: selectedSource
-                    }
-                }
-            } as MediaStreamConstraints // Type assertion needed for Electron-specific constraints
-
-            const stream = await navigator.mediaDevices.getUserMedia(constraints)
-
-            // Handle stream ending (user stops sharing)
-            stream.getVideoTracks()[0].addEventListener('ended', () => {
-                setIsScreenSharing(false)
-                setActiveDevice('none')
-            })
-
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream
-            }
-
-            setActiveDevice('screen')
-            setIsScreenSharing(true)
-        } catch (error) {
-            console.error('Error sharing screen: ', error)
         }
     }
 
@@ -284,10 +250,11 @@ function App() {
         }
 
         try {
-            const rtmpUrl1 = rtmpUrl + '1'
+            const rtmpUrl1 = rtmpUrl + 1
+            console.log(currentVideoDevice)
             const result = await window.api.startRtmpStream({
                 videoDeviceId: currentVideoDevice,
-                audioDeviceId: isMicrophoneActive ? currentAudioDevice : undefined,
+                audioDeviceId: currentAudioDevice,
                 rtmpUrl: rtmpUrl1
             })
 
@@ -358,7 +325,6 @@ function App() {
         }
     }
 
-    // Change audio device
     const handleAudioDeviceChange = (e: ChangeEvent<HTMLSelectElement>) => {
         setCurrentAudioDevice(e.target.value)
         if (isMicrophoneActive) {
@@ -369,8 +335,7 @@ function App() {
     const sendAll = async () => {
         await startCamera()
         await startMicrophone()
-        await startScreenShare()
-        // await startRtmpStreaming()
+        await startRtmpStreaming()
         await startScreenRtmpStreaming()
     }
 

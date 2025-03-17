@@ -1,2 +1,2 @@
-export * from './ffmpegUtils';
-export * from './screenUtils';
+export * from './ffmpegUtils'
+export * from './screenUtils'
